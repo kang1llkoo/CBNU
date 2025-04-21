@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>이상 탐지 기법 선택</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/leaflet.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/leaflet.js"></script>
+
+  <style>
+    /* 모달 배경 */
+    #techniqueModal {
+      position: fixed; top:0; left:0; right:0; bottom:0;
+      background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000;
+    }
+    /* 모달 콘텐츠 */
+    #techniqueModal .modal-content {
+      background: white; padding: 20px; border-radius: 8px;
+      width: 300px; text-align: center;
+    }
+    #techniqueModal h2 {
+      margin-top: 0;
+    }
+    #techniqueModal button {
+      margin-top: 10px; padding: 8px 16px; font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <!-- 선택 모달 -->
+  <div id="techniqueModal">
+    <div class="modal-content">
+      <h2>이상 탐지 기법 선택</h2>
+      <label><input type="radio" name="tech" value="cell_frequency" checked> Cell Frequency</label><br>
+      <label><input type="radio" name="tech" value="pair_frequency"> Pair Frequency</label><br>
+      <label><input type="radio" name="tech" value="trace_similarity"> Trace Similarity</label><br>
+      <button onclick="onTechniqueConfirm()">확인</button>
+    </div>
+  </div>
+
+  <!-- 지도 -->
+  <div id="map" style="width:100%; height:600px;"></div>
+
+  <script>
+    var map = L.map('map').setView([36.5,127.5],7);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution:'&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    var markers = [], polylines = [], pathCoords = [], updateInterval;
+
+    function clearMap() {
+      markers.forEach(m=>map.removeLayer(m));
+      polylines.forEach(l=>map.removeLayer(l));
+      markers = []; polylines = []; pathCoords = [];
+    }
+
+    // CSV → 표시
+    function fetchAndRender(csvFile, recenter) {
+      fetch(csvFile).then(r=>r.text()).then(data=>{
+        const rows = data.trim().split("\n");
+        if (recenter && rows.length>1) {
+          const [lat,lng] = rows[1].split(",").map(Number);
+          map.setView([lat,lng],13);
+        }
+        clearMap();
+        rows.slice(1).forEach(line=>{
+          const [lat,lng,anom] = line.split(",");
+          const isAnom = anom.trim()==="1";
+          const iconUrl = isAnom
+            ? 'https://maps.google.com/mapfiles/ms/icons/red-dot.png'
+            : 'https://maps.google.com/mapfiles/ms/icons/blue-dot.png';
+          const m = L.marker([+lat,+lng], {
+            icon:L.icon({iconUrl,iconSize:[32,32]})
+          }).addTo(map)
+            .bindPopup(isAnom?"🚨 이상 탐지됨!":"최근 위치");
+          markers.push(m);
+          if(isAnom) alert(`🚨 이상치: (${lat},${lng})`);
+          pathCoords.push([+lat,+lng]);
+        });
+        if (pathCoords.length>1) {
+          const line = L.polyline(pathCoords,{color:'blue',weight:3,opacity:0.5}).addTo(map);
+          polylines.push(line);
+        }
+      });
+    }
+
+    function startUpdating(tech) {
+      // 파일 매핑
+      const fileMap = {
+        cell_frequency:   '/static/test_cell.csv',
+        pair_frequency:   'C:/Users/d/OneDrive - 충북대학교/바탕 화면/캡스톤디자인/static/test_pair.csv',
+        trace_similarity: 'C:/Users/d/OneDrive - 충북대학교/바탕 화면/캡스톤디자인/static/test_similarity.csv'
+      };
+      const csv = fileMap[tech];
+      // 첫 렌더링 + 리센터
+      fetchAndRender(csv, true);
+      // 주기 렌더링(리센터 안 함)
+      updateInterval = setInterval(()=>fetchAndRender(csv, false), 2000);
+    }
+
+    function onTechniqueConfirm() {
+      const tech = document.querySelector('input[name=tech]:checked').value;
+      document.getElementById('techniqueModal').style.display = 'none';
+      // Airflow 트리거
+      fetch("http://localhost:8080/api/v1/dags/web_input_dag/dagRuns", {
+        method:"POST",
+        headers:{
+          "Content-Type":"application/json",
+          "Authorization":"Basic "+btoa("airflow:airflow")
+        },
+        body:JSON.stringify({conf:{technique:tech}})
+      }).then(res=>{
+        if(!res.ok) console.error("DAG Trigger 실패:",res.status);
+        startUpdating(tech);
+      });
+    }
+  </script>
+</body>
+</html>
