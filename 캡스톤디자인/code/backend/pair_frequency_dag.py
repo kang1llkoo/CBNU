@@ -8,20 +8,21 @@ import numpy as np
 import pandas as pd
 from scipy.stats import iqr
 from collections import defaultdict
+import time
 
 default_args = {
     'owner': 'airflow',
     'start_date': datetime.now()
 }
 
-labeled_data_path = '/opt/airflow/dags/Label'
-test_dataset_path = '/opt/airflow/dags/Test'
-grid_info_file = '/opt/airflow/dags/grid_information_with_paths.csv'
+labeled_data_path = '/opt/airflow/dags/user_labeled'
+test_dataset_path = '/opt/airflow/dags/user_test/pair'
+grid_info_file = '/opt/airflow/dags/grid_information_with_paths_2.csv'
 
 dag = DAG(
-    'pair_frequency',
+    'pair_frequency_dag',
     default_args=default_args,
-    description='wedrive_pair_frequency',
+    description='graduation_pair_frequency',
     schedule_interval=None
 )
 
@@ -99,10 +100,11 @@ def validate_test_data(**kwargs):
                             print(f"Pair: {pair} is not in label_frequencies.csv")
                     else:
                         print(f'The point ({lat}, {lng}) is not in any grid.')
+
                     previous_label = label
 
 def notify_anomaly_to_flask():
-    url = 'http://127.0.0.1:5000/set_anomaly'
+    url = 'http://host.docker.internal:5000/set_anomaly'
     response = requests.post(url)
     if response.status_code == 200:
         print("Flask 서버에 이상 탐지 완료!")
