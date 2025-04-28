@@ -1,121 +1,122 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.operators.dummy import DummyOperator
 from datetime import datetime
-from flask import Flask, requests
 import os
 import pandas as pd
+import ast
+import requests
+import time
 
-labeled_data_path = '/opt/airflow/dags/Label'
-test_dataset_path = '/opt/airflow/dags/Test'
-grid_info_file = '/opt/airflow/dags/grid_information_with_paths.csv'
-user_selection_file = '/opt/airflow/dags/user_selection.txt'
+# 경로 설정
+labeled_data_path = '/opt/airflow/dags/user_labeled'
+test_dataset_path = '/opt/airflow/dags/user_test/trace/'
+grid_info_file = '/opt/airflow/dags/grid_information_with_paths_2.csv'
 
+# DAG 설정
 default_args = {
     'owner': 'airflow',
     'start_date': datetime.now()
 }
 
 dag = DAG(
-    'trace_similarity',
+    'trace_similarity_dag',
     default_args=default_args,
-    description='Trace Similarity Anomaly Detection',
+    description='graduation_trace_similarity',
     schedule_interval=None
 )
 
-# 사용자 선택을 확인하는 함수
-def check_user_selection():
-    with open(user_selection_file, 'r') as f:
-        selection = f.read().strip()
-    return selection == "Trace"
-
 # Jaro Similarity 계산 함수
+
 def jaro_similarity(list1, list2):
-    len_list1, len_list2 = len(list1), len(list2)
-    max_len = max(len_list1, len_list2)
-    match_count = 0
-    matches_list1, matches_list2 = [False] * len_list1, [False] * len_list2
-    
-    for i in range(len_list1):
-        start, end = max(0, i - max_len // 2), min(i + max_len // 2 + 1, len_list2)
+    len1, len2 = len(list1), len(list2)
+    max_dist = max(len1, len2) // 2
+    match1 = [False]*len1
+    match2 = [False]*len2
+    matches = 0
+    for i in range(len1):
+        start = max(0, i-max_dist)
+        end = min(i+max_dist+1, len2)
         for j in range(start, end):
-            if not matches_list2[j] and list1[i] == list2[j]:
-                matches_list1[i] = matches_list2[j] = True
-                match_count += 1
+            if not match2[j] and list1[i] == list2[j]:
+                match1[i] = match2[j] = True
+                matches += 1
                 break
-    
-    if match_count == 0:
+    if matches == 0:
         return 0.0
-    
-    transpositions = sum(list1[i] != list2[k] for i, k in enumerate(filter(lambda x: matches_list2[x], range(len_list2))))
-    
-    return ((match_count / len_list1 + match_count / len_list2 + (match_count - transpositions / 2) / match_count) / 3.0)
+    transpositions = 0
+    k = 0
+    for i in range(len1):
+        if match1[i]:
+            while not match2[k]:
+                k += 1
+            if list1[i] != list2[k]:
+                transpositions += 1
+            k += 1
+    transpositions /= 2
+    return ((matches/len1 + matches/len2 + (matches-transpositions)/matches) / 3)
 
 # 라벨 데이터 처리 및 유사도 계산
 def process_label_data(**kwargs):
-    if not check_user_selection():
-        return
-    
-    geo_trace_pts, frequent_pattern, normal_pattern = {}, {}, {}
-    csv_files = [f for f in os.listdir(labeled_data_path) if f.endswith('.csv')]
-    
-    for file in csv_files:
-        file_path = os.path.join(labeled_data_path, file)
-        df = pd.read_csv(file_path)['grid_label']
-        geo_trace = list(dict.fromkeys(df.tolist()))
-        geo_trace_pts[tuple(geo_trace)] = geo_trace_pts.get(tuple(geo_trace), 0) + 1
-    
-    sorted_geo_trace_pts = dict(sorted(geo_trace_pts.items(), key=lambda x: x[1], reverse=True))
-    
-    for key, value in sorted_geo_trace_pts.items():
-        (frequent_pattern if value >= 2 else normal_pattern)[key] = value
-    
-    cell_list = [list2 for key1 in normal_pattern for key2 in frequent_pattern
-                 if key1 != key2 and jaro_similarity(list(key1), list(key2)) > 0.80]
-    kwargs['ti'].xcom_push(key='cell', value=list(set(cell_list)))
+    geo_trace_pts = {}
+    frequent_pattern = {}
+    normal_pattern = {}
+
+    # Label 디렉토리 내 CSV 파일 처리
+    for fname in os.listdir(labeled_data_path):
+        if not fname.endswith('.csv'): continue
+        df = pd.read_csv(os.path.join(labeled_data_path, fname))['grid_label']
+        # 중복 제거된 trace
+        trace = list(dict.fromkeys(df.tolist()))
+        geo_trace_pts[tuple(trace)] = geo_trace_pts.get(tuple(trace), 0) + 1
+
+    # 패턴 분류
+    for trace, cnt in geo_trace_pts.items():
+        (frequent_pattern if cnt>=2 else normal_pattern)[trace] = cnt
+
+    # 유사도 기준으로 정상/이상 기준 셋 생성
+    cell = set()
+    for n in normal_pattern:
+        for f in frequent_pattern:
+            if jaro_similarity(list(n), list(f)) <= 0.80:
+                cell.update(f)
+    kwargs['ti'].xcom_push(key='cell', value=list(cell))
 
 # 테스트 데이터 처리
 def process_test_data(**kwargs):
-    if not check_user_selection():
-        return
-    
     cell = kwargs['ti'].xcom_pull(task_ids='process_label_data', key='cell')
-    grid_info = pd.read_csv(grid_info_file)
-    
-    for filename in os.listdir(test_dataset_path):
-        if filename.endswith('.csv'):
-            df = pd.read_csv(os.path.join(test_dataset_path, filename))
-            for _, row in df.iterrows():
-                label = find_label_for_point(row['lat'], row['lng'], grid_info)
-                print(f"사용자 현재 위치: {label}")
-                print('정상 경로' if label in cell else '비정상 경로')
+    grid_df = pd.read_csv(grid_info_file)
 
-# 특정 좌표에 대한 라벨 찾기
-def find_label_for_point(lat, lng, grid_info):
-    for _, row in grid_info.iterrows():
-        min_lat, min_lng = eval(row['Min Latitude, Min Longitude'])
-        max_lat, max_lng = eval(row['Max Latitude, Max Longitude'])
-        if min_lat <= lat <= max_lat and min_lng <= lng <= max_lng:
-            return row['Grid Name']
-    return None
+    # 좌표 → Grid Name 매핑 함수
+    def find_label(lat, lng):
+        for _, r in grid_df.iterrows():
+            min_lat, min_lng = ast.literal_eval(r['Min Latitude, Min Longitude'])
+            max_lat, max_lng = ast.literal_eval(r['Max Latitude, Max Longitude'])
+            if min_lat<=lat<=max_lat and min_lng<=lng<=max_lng:
+                return r['Grid Name']
+        return None
 
+    # Test 디렉토리 내 CSV 처리
+    for fname in os.listdir(test_dataset_path):
+        if not fname.endswith('.csv'): continue
+        df = pd.read_csv(os.path.join(test_dataset_path, fname))
+        for _, row in df.iterrows():
+            label = find_label(row['lat'], row['lng'])
+            status = '정상 경로' if label in cell else '비정상 경로'
+            print(f"사용자 현재 위치: {label} -> {status}")
+
+# 이상 발생 시 Flask 알림
 def notify_anomaly_to_flask():
-    url = 'http://127.0.0.1:5000/set_anomaly'
-    response = requests.post(url)
-    if response.status_code == 200:
+    url = 'http://host.docker.internal:5000/set_anomaly'
+    resp = requests.post(url)
+    if resp.ok:
         print("Flask 서버에 이상 탐지 완료!")
     else:
-        print("알림 실패!")
+        print("알림 실패!", resp.status_code)
 
-start_task = DummyOperator(task_id='start', dag=dag)
-process_label_data_task = PythonOperator(task_id='process_label_data', python_callable=process_label_data, dag=dag)
-process_test_data_task = PythonOperator(task_id='process_test_data', python_callable=process_test_data, dag=dag)
-end_task = DummyOperator(task_id='end', dag=dag)
+# 태스크 정의
+label_task = PythonOperator(task_id='process_label_data', python_callable=process_label_data, dag=dag)
+test_task = PythonOperator(task_id='process_test_data', python_callable=process_test_data, dag=dag)
+anom_task = PythonOperator(task_id='notify_anomaly_to_flask', python_callable=notify_anomaly_to_flask, dag=dag)
 
-anomaly_send_task = PythonOperator(
-    task_id = 'notify_anomaly_to_flask',
-    python_callable = notify_anomaly_to_flask,
-    dag = dag
-)
-
-start_task >> process_label_data_task >> process_test_data_task >> end_task >> anomaly_send_task
+# 순서 설정
+label_task >> test_task >> anom_task
