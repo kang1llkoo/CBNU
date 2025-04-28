@@ -6,20 +6,21 @@ import os
 import pandas as pd
 import ast
 import requests
+import time
 
 default_args = {
     'owner': 'airflow',
     'start_date': datetime.now()
 }
 
-labeled_data_path = "/opt/airflow/dags/Label"
-test_dataset_path = "/opt/airflow/dags/Test"
-grid_info_file = "/opt/airflow/dags/grid_information_with_paths.csv"
+labeled_data_path = "/opt/airflow/dags/user_labeled"
+test_dataset_path = "/opt/airflow/dags/user_test/cell"
+grid_info_file = "/opt/airflow/dags/grid_information_with_paths_2.csv"
 
 dag = DAG(
-    'cell_frequency',
+    'cell_frequency_dag',
     default_args=default_args,
-    description='wedrive_cell_frequency',
+    description='graduation_cell_frequency',
     schedule_interval=None,  # 트리거 방식으로 실행
     catchup=False,
 )
@@ -81,12 +82,13 @@ def filter_test_data(**kwargs):
                         print(f"Label {label} not in frequency data")
 
 def notify_anomaly_to_flask():
-    url = 'http://127.0.0.1:5000/set_anomaly'
+    url = 'http://host.docker.internal:5000/set_anomaly'
     response = requests.post(url)
     if response.status_code == 200:
         print("Flask 서버에 이상 탐지 완료!")
     else:
         print("알림 실패")
+
 
 compute_frequencies_task = PythonOperator(
     task_id='compute_label_frequencies',
